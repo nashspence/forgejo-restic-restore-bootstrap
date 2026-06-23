@@ -28,8 +28,10 @@ then run:
 
 For files ending in `.age`, the script normally uses interactive `age -d`.
 For noninteractive use, set `AGE_PASSPHRASE`; the script will then use
-`age -d -j batchpass`, which requires `age-plugin-batchpass` on `PATH`.
-Explicit environment variables override profile values for emergency tweaks.
+`age -d -j batchpass`. If `age`, `age-plugin-batchpass`, or `restic` are not
+available, the script downloads pinned upstream release binaries into a rootless
+tool cache before restore. Explicit environment variables override profile
+values for emergency tweaks.
 
 ## Profile Format
 
@@ -98,8 +100,25 @@ WORK_DIR=/tmp/forgejo-restic-restore   # restore workspace
 CLONE_DIR="$PWD/restored-repo"          # checkout destination
 VERIFY_ONLY=1                          # restore and verify bare repo only
 FORCE_CHECKOUT=1                       # allow checkout into a non-empty target
-INSTALL_DEPS=0                         # do not apt-install missing commands
+INSTALL_DEPS=0                         # do not apt-install missing OS packages
+DOWNLOAD_BOOTSTRAP_TOOLS=0             # do not download pinned age/restic tools
+BOOTSTRAP_TOOL_DIR=/tmp/restore-tools  # rootless tool cache
+AGE_VERSION=v1.3.1                     # upstream age release with batchpass
+RESTIC_VERSION=0.18.1                  # upstream restic release
 ```
+
+## Bootstrap Tooling
+
+The script does not require private host-managed files to start recovery. When
+`DOWNLOAD_BOOTSTRAP_TOOLS=1` (the default), missing `age`,
+`age-plugin-batchpass`, and `restic` are downloaded from official upstream
+release artifacts into `BOOTSTRAP_TOOL_DIR`. This keeps encrypted profile
+loading and restic restore usable on a fresh host before private config repos
+have been restored.
+
+`INSTALL_DEPS=0` disables apt-based OS package installation but still allows
+rootless pinned tool downloads. Set `DOWNLOAD_BOOTSTRAP_TOOLS=0` as well when
+you want a fully pre-provisioned/offline run that fails on missing tools.
 
 ## What It Does
 

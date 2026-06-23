@@ -4,6 +4,10 @@ set -euo pipefail
 PROFILE_PATH=""
 PROFILE_NAME=""
 INSTALL_DEPS="${INSTALL_DEPS:-1}"
+DOWNLOAD_BOOTSTRAP_TOOLS="${DOWNLOAD_BOOTSTRAP_TOOLS:-1}"
+BOOTSTRAP_TOOL_DIR="${BOOTSTRAP_TOOL_DIR:-${TMPDIR:-/tmp}/forgejo-restic-restore-tools}"
+AGE_VERSION="${AGE_VERSION:-v1.3.1}"
+RESTIC_VERSION="${RESTIC_VERSION:-0.18.1}"
 
 RESTIC_REPOSITORY="${RESTIC_REPOSITORY:-}"
 FORGEJO_REPO_PATH="${FORGEJO_REPO_PATH:-}"
@@ -59,7 +63,10 @@ Useful optional environment or profile values:
   CLONE_DIR               checkout destination, default: ./$FORGEJO_REPO_NAME or ./restored-repo
   VERIFY_ONLY=1           restore and verify the bare repo without checkout
   FORCE_CHECKOUT=1        allow forced checkout into a non-empty target
-  INSTALL_DEPS=0          fail instead of apt-installing missing commands
+  INSTALL_DEPS=0          fail instead of apt-installing missing OS packages
+  DOWNLOAD_BOOTSTRAP_TOOLS=0
+                          do not download pinned upstream age/restic tools
+  BOOTSTRAP_TOOL_DIR      rootless tool cache, default: /tmp/forgejo-restic-restore-tools
 
 Explicit environment variables override profile values.
 EOF
@@ -89,22 +96,136 @@ parse_args() {
   done
 }
 
+tool_arch() {
+  local machine
+  machine="$(uname -m)"
+  case "$machine" in
+    x86_64|amd64) printf 'amd64' ;;
+    aarch64|arm64) printf 'arm64' ;;
+    armv7l|armhf) printf 'arm' ;;
+    *) die "unsupported CPU architecture for bootstrap tool download: $machine" ;;
+  esac
+}
+
+download_file() {
+  local url="$1"
+  local dest="$2"
+  python3 - "$url" "$dest" <<'PYCODE'
+from __future__ import annotations
+
+import sys
+import urllib.request
+
+urllib.request.urlretrieve(sys.argv[1], sys.argv[2])
+PYCODE
+}
+
+ensure_tool_dir_on_path() {
+  local bin_dir="$BOOTSTRAP_TOOL_DIR/bin"
+  mkdir -p "$bin_dir"
+  case ":$PATH:" in
+    *":$bin_dir:"*) ;;
+    *) export PATH="$bin_dir:$PATH" ;;
+  esac
+}
+
+install_upstream_age() {
+  local arch
+  local tmp
+  local archive
+  local age_dir
+  [[ "$DOWNLOAD_BOOTSTRAP_TOOLS" == "1" ]] || return 1
+  command -v python3 >/dev/null 2>&1 || return 1
+  command -v tar >/dev/null 2>&1 || return 1
+  command -v gzip >/dev/null 2>&1 || return 1
+
+  ensure_tool_dir_on_path
+  if command -v age >/dev/null 2>&1 && command -v age-plugin-batchpass >/dev/null 2>&1; then
+    return 0
+  fi
+
+  arch="$(tool_arch)"
+  tmp="$(mktemp -d)"
+  archive="$tmp/age.tar.gz"
+  log "downloading upstream age $AGE_VERSION into $BOOTSTRAP_TOOL_DIR"
+  download_file "https://github.com/FiloSottile/age/releases/download/${AGE_VERSION}/age-${AGE_VERSION}-linux-${arch}.tar.gz" "$archive"
+  tar -xzf "$archive" -C "$tmp"
+  age_dir="$(tar -tzf "$archive" | head -1 | cut -d/ -f1)"
+  cp "$tmp/$age_dir/age" "$tmp/$age_dir/age-keygen" "$tmp/$age_dir/age-plugin-batchpass" "$BOOTSTRAP_TOOL_DIR/bin/"
+  chmod 0755 "$BOOTSTRAP_TOOL_DIR/bin/age" "$BOOTSTRAP_TOOL_DIR/bin/age-keygen" "$BOOTSTRAP_TOOL_DIR/bin/age-plugin-batchpass"
+  rm -rf "$tmp"
+}
+
+install_upstream_restic() {
+  local arch
+  local tmp
+  local archive
+  local dest
+  [[ "$DOWNLOAD_BOOTSTRAP_TOOLS" == "1" ]] || return 1
+  command -v python3 >/dev/null 2>&1 || return 1
+
+  ensure_tool_dir_on_path
+  if command -v restic >/dev/null 2>&1; then
+    return 0
+  fi
+
+  arch="$(tool_arch)"
+  tmp="$(mktemp -d)"
+  archive="$tmp/restic.bz2"
+  dest="$BOOTSTRAP_TOOL_DIR/bin/restic"
+  log "downloading upstream restic $RESTIC_VERSION into $BOOTSTRAP_TOOL_DIR"
+  download_file "https://github.com/restic/restic/releases/download/v${RESTIC_VERSION}/restic_${RESTIC_VERSION}_linux_${arch}.bz2" "$archive"
+  python3 - "$archive" "$dest" <<'PYCODE'
+from __future__ import annotations
+
+import bz2
+import sys
+from pathlib import Path
+
+Path(sys.argv[2]).write_bytes(bz2.decompress(Path(sys.argv[1]).read_bytes()))
+PYCODE
+  chmod 0755 "$dest"
+  rm -rf "$tmp"
+}
+
 install_missing_commands() {
   local missing_packages=()
   local missing_labels=()
   local cmd
+  local needs_batchpass=0
 
-  for cmd in git restic; do
+  if [[ -n "$PROFILE_PATH" && "$PROFILE_PATH" == *.age && -n "${AGE_PASSPHRASE:-}" ]]; then
+    needs_batchpass=1
+  fi
+
+  if ! command -v restic >/dev/null 2>&1; then
+    install_upstream_restic || true
+  fi
+
+  if [[ -n "$PROFILE_PATH" && "$PROFILE_PATH" == *.age ]]; then
+    if ! command -v age >/dev/null 2>&1 || { [[ "$needs_batchpass" == "1" ]] && ! command -v age-plugin-batchpass >/dev/null 2>&1; }; then
+      install_upstream_age || true
+    fi
+  fi
+
+  for cmd in git; do
     if ! command -v "$cmd" >/dev/null 2>&1; then
       missing_packages+=("$cmd")
       missing_labels+=("$cmd")
     fi
   done
 
+  if ! command -v restic >/dev/null 2>&1; then
+    missing_labels+=("restic")
+  fi
+
   if [[ -n "$PROFILE_PATH" ]]; then
     if [[ "$PROFILE_PATH" == *.age ]] && ! command -v age >/dev/null 2>&1; then
-      missing_packages+=("age")
       missing_labels+=("age")
+      missing_packages+=("age")
+    fi
+    if [[ "$needs_batchpass" == "1" ]] && ! command -v age-plugin-batchpass >/dev/null 2>&1; then
+      missing_labels+=("age-plugin-batchpass")
     fi
     if ! command -v python3 >/dev/null 2>&1; then
       missing_packages+=("python3")
@@ -116,22 +237,41 @@ install_missing_commands() {
     fi
   fi
 
-  [[ "${#missing_packages[@]}" -gt 0 ]] || return 0
+  [[ "${#missing_labels[@]}" -gt 0 ]] || return 0
 
-  if [[ "$INSTALL_DEPS" != "1" ]]; then
+  if [[ "${#missing_packages[@]}" -eq 0 || "$INSTALL_DEPS" != "1" ]]; then
     die "missing required command(s): ${missing_labels[*]}"
   fi
 
   command -v apt-get >/dev/null 2>&1 || die "missing required command(s): ${missing_labels[*]}; apt-get is unavailable"
 
-  log "installing missing dependencies: ${missing_labels[*]}"
+  log "installing missing OS dependencies: ${missing_packages[*]}"
   if [[ "$EUID" -eq 0 ]]; then
     apt-get update
     apt-get install -y ca-certificates "${missing_packages[@]}"
   else
-    command -v sudo >/dev/null 2>&1 || die "sudo is required to install: ${missing_labels[*]}"
+    command -v sudo >/dev/null 2>&1 || die "sudo is required to install: ${missing_packages[*]}"
     sudo apt-get update
     sudo apt-get install -y ca-certificates "${missing_packages[@]}"
+  fi
+
+  if ! command -v restic >/dev/null 2>&1; then
+    install_upstream_restic || true
+  fi
+  if [[ -n "$PROFILE_PATH" && "$PROFILE_PATH" == *.age ]]; then
+    if ! command -v age >/dev/null 2>&1 || { [[ "$needs_batchpass" == "1" ]] && ! command -v age-plugin-batchpass >/dev/null 2>&1; }; then
+      install_upstream_age || true
+    fi
+  fi
+
+  if ! command -v restic >/dev/null 2>&1; then
+    die "missing required command(s): restic"
+  fi
+  if [[ -n "$PROFILE_PATH" && "$PROFILE_PATH" == *.age ]] && ! command -v age >/dev/null 2>&1; then
+    die "missing required command(s): age"
+  fi
+  if [[ "$needs_batchpass" == "1" ]] && ! command -v age-plugin-batchpass >/dev/null 2>&1; then
+    die "missing required command(s): age-plugin-batchpass"
   fi
 }
 
