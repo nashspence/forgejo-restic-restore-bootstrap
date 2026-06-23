@@ -79,6 +79,30 @@ cp -a "$FAKE_SNAPSHOT_ROOT$include" "$target$include"
     return bin_dir
 
 
+def add_fake_age_batchpass(bin_dir: Path) -> Path:
+    args_file = bin_dir / "age-args.txt"
+    age = bin_dir / "age"
+    age.write_text(
+        """#!/usr/bin/env bash
+set -euo pipefail
+printf '%s\n' "$*" >"$FAKE_AGE_ARGS"
+[[ "${1:-}" == "-d" && "${2:-}" == "-j" && "${3:-}" == "batchpass" ]] || exit 7
+cat "${4:?}"
+""",
+        encoding="utf-8",
+    )
+    age.chmod(0o755)
+    plugin = bin_dir / "age-plugin-batchpass"
+    plugin.write_text(
+        """#!/usr/bin/env bash
+echo fake age-plugin-batchpass
+""",
+        encoding="utf-8",
+    )
+    plugin.chmod(0o755)
+    return args_file
+
+
 def test_plaintext_profile_restores_selected_repo(tmp_path: Path) -> None:
     include_path = "/repositories/example.git"
     snapshot_root = make_bare_repo(tmp_path, include_path)
@@ -177,3 +201,41 @@ profiles:
     assert result.returncode == 0, result.stderr + result.stdout
     assert (checkout / "README.md").is_file()
     assert not wrong_checkout.exists()
+
+
+def test_age_profile_uses_batchpass_when_passphrase_env_is_set(tmp_path: Path) -> None:
+    include_path = "/repositories/example.git"
+    snapshot_root = make_bare_repo(tmp_path, include_path)
+    bin_dir = fake_restic_bin(tmp_path)
+    age_args = add_fake_age_batchpass(bin_dir)
+    checkout = tmp_path / "checkout"
+    profile = tmp_path / "profiles.yml.age"
+    profile.write_text(
+        f"""
+profiles:
+  example:
+    restic_repository: fake-restic-repo
+    forgejo_repo_path: {include_path}
+    clone_dir: {checkout}
+    work_dir: {tmp_path / 'restore-work'}
+    env:
+      RESTIC_PASSWORD: test-password
+""",
+        encoding="utf-8",
+    )
+
+    result = run(
+        [str(SCRIPT), "--profile", str(profile), "--profile-name", "example"],
+        env={
+            "PATH": f"{bin_dir}:{os.environ['PATH']}",
+            "FAKE_SNAPSHOT_ROOT": str(snapshot_root),
+            "FAKE_AGE_ARGS": str(age_args),
+            "AGE_PASSPHRASE": "test-passphrase",
+            "INSTALL_DEPS": "0",
+        },
+        cwd=tmp_path,
+    )
+
+    assert result.returncode == 0, result.stderr + result.stdout
+    assert age_args.read_text(encoding="utf-8").strip() == f"-d -j batchpass {profile}"
+    assert (checkout / "README.md").read_text(encoding="utf-8") == "restored\n"

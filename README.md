@@ -26,9 +26,10 @@ then run:
   --profile-name primary
 ```
 
-The script uses `age -d` for files ending in `.age`, so passphrase-encrypted age
-files will prompt interactively. Explicit environment variables override profile
-values for emergency tweaks.
+For files ending in `.age`, the script normally uses interactive `age -d`.
+For noninteractive use, set `AGE_PASSPHRASE`; the script will then use
+`age -d -j batchpass`, which requires `age-plugin-batchpass` on `PATH`.
+Explicit environment variables override profile values for emergency tweaks.
 
 ## Profile Format
 

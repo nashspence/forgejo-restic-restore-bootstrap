@@ -8,14 +8,14 @@ INSTALL_DEPS="${INSTALL_DEPS:-1}"
 RESTIC_REPOSITORY="${RESTIC_REPOSITORY:-}"
 FORGEJO_REPO_PATH="${FORGEJO_REPO_PATH:-}"
 FORGEJO_REPO_NAME="${FORGEJO_REPO_NAME:-}"
-BRANCH="${BRANCH:-main}"
-SNAPSHOT="${SNAPSHOT:-latest}"
-WORK_DIR="${WORK_DIR:-${TMPDIR:-/tmp}/forgejo-restic-restore}"
-RESTORE_ROOT="${RESTORE_ROOT:-$WORK_DIR/restic-restore}"
-RESTIC_CACHE_DIR="${RESTIC_CACHE_DIR:-$WORK_DIR/restic-cache}"
+BRANCH="${BRANCH:-}"
+SNAPSHOT="${SNAPSHOT:-}"
+WORK_DIR="${WORK_DIR:-}"
+RESTORE_ROOT="${RESTORE_ROOT:-}"
+RESTIC_CACHE_DIR="${RESTIC_CACHE_DIR:-}"
 CLONE_DIR="${CLONE_DIR:-}"
-VERIFY_ONLY="${VERIFY_ONLY:-0}"
-FORCE_CHECKOUT="${FORCE_CHECKOUT:-0}"
+VERIFY_ONLY="${VERIFY_ONLY:-}"
+FORCE_CHECKOUT="${FORCE_CHECKOUT:-}"
 
 log() {
   printf '==> %s\n' "$*"
@@ -235,7 +235,12 @@ load_profile() {
 
   if [[ "$PROFILE_PATH" == *.age ]]; then
     temp_profile="$(mktemp)"
-    age -d "$PROFILE_PATH" >"$temp_profile"
+    if [[ -n "${AGE_PASSPHRASE:-}" ]]; then
+      command -v age-plugin-batchpass >/dev/null 2>&1 || die "AGE_PASSPHRASE requires age-plugin-batchpass on PATH"
+      age -d -j batchpass "$PROFILE_PATH" >"$temp_profile"
+    else
+      age -d "$PROFILE_PATH" >"$temp_profile"
+    fi
     plaintext_profile="$temp_profile"
   fi
 
