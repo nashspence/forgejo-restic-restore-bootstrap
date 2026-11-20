@@ -27,7 +27,7 @@ def run(argv: list[str], *, env: dict[str, str] | None = None, cwd: Path | None 
 def make_bare_repo(tmp_path: Path, include_path: str) -> Path:
     work = tmp_path / "source-work"
     work.mkdir()
-    run(["git", "init"], cwd=work).check_returncode()
+    run(["git", "init", "--initial-branch=main"], cwd=work).check_returncode()
     run(["git", "config", "user.email", "test@example.invalid"], cwd=work).check_returncode()
     run(["git", "config", "user.name", "Test User"], cwd=work).check_returncode()
     (work / "README.md").write_text("restored\n", encoding="utf-8")
